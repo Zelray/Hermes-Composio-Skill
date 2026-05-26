@@ -1,0 +1,15 @@
+# local-only files
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+
+# never commit secrets — defense in depth even though none should be here
+.env
+.env.*
+*api_key*.txt
+*secret*
+
+# editor noise
+.vscode/
+.idea/

@@ -24,7 +24,7 @@ TRANSPORT="mcp"   # MCP first, REST as the longboard fallback, brah
 VERBOSE=0
 QUIET=0           # suppress non-essential lines (also dampens surfer voice)
 NO_FLAIR=0        # plain-English mode, no surfer talk
-BASE_URL="${COMPOSIO_BASE_URL:-https://backend.composio.dev/api/v1}"
+BASE_URL="${COMPOSIO_BASE_URL:-https://backend.composio.dev/api/v3}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -118,13 +118,28 @@ HTTP_CODE=$(curl -sS -o /tmp/composio_verify.json -w "%{http_code}" \
 case "$HTTP_CODE" in
   200)
     ok "Composio backend says: ride's on. (HTTP 200)" ;;
-  401|403)
-    bad "Auth failed. Key is bad or revoked. Rotate at platform.composio.dev/settings."
+  401)
+    # Distinguish bad key from DB-propagation lag
+    if grep -q "Failed to fetch API key information from DB" /tmp/composio_verify.json 2>/dev/null; then
+      warn "Composio reports DB key-propagation lag (code 10401). New keys take ~5 min to propagate. Wait and retry."
+      exit 1
+    fi
+    bad "Auth failed (HTTP 401). Key is bad or revoked. Rotate at platform.composio.dev/settings."
+    exit 1 ;;
+  403)
+    bad "Forbidden (HTTP 403). Key valid but lacks permission. Check key scope in Composio dashboard."
+    exit 1 ;;
+  410)
+    bad "Endpoint deprecated (HTTP 410). Set COMPOSIO_BASE_URL=https://backend.composio.dev/api/v3 and rerun."
     exit 1 ;;
   000)
     bad "Couldn't reach Composio at all. Firewall? DNS? No swell today."
     exit 1 ;;
   5*)
+    if grep -q "Failed to fetch API key information from DB" /tmp/composio_verify.json 2>/dev/null; then
+      warn "Composio backend DB hiccup (code 809). Wait 5 minutes and retry."
+      exit 1
+    fi
     bad "Composio backend is slammed (HTTP $HTTP_CODE). Try again in a sec."
     exit 1 ;;
   *)

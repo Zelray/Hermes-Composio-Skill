@@ -9,23 +9,25 @@
 - [ ] `hermes config check` reports no schema errors.
 - [ ] `~/.hermes/.env` exists and is mode `600`: `stat -c '%a' ~/.hermes/.env` → `600`.
 
+> **Note:** Hermes 0.14 has no `hermes config get` subcommand. Use `hermes config show` and grep, or read `~/.hermes/config.yaml` directly with Python/yq.
+
 ## 1. API key
 
 - [ ] `COMPOSIO_API_KEY` is set (env, `.env`, or `hermes config get composio.api_key`).
 - [ ] Key length ≥ 20 characters.
 - [ ] Key has no whitespace.
 - [ ] `bash ~/.hermes/skills/composio/scripts/verify_composio.sh` returns exit 0.
-- [ ] Direct probe — **source `.env` into the current shell first if the key is stored there**:
+- [ ] Direct probe — **source `.env` into the current shell first if the key is stored there**. Use v3 endpoint (v1 is deprecated, returns 410):
   ```bash
   set -a; source ~/.hermes/.env; set +a
-  curl -sS -o /dev/null -w "%{http_code}" -H "x-api-key:$COMPOSIO_API_KEY" https://backend.composio.dev/api/v1/toolkits
+  curl -sS -o /dev/null -w "%{http_code}" -H "x-api-key:$COMPOSIO_API_KEY" https://backend.composio.dev/api/v3/toolkits
   ```
-  Expect `200`.
+  Expect `200`. If you see `401 / Failed to fetch API key information from DB`, the key is propagating — wait 5 minutes and retry.
 
 ## 2a. Transport (Path A — MCP)
 
-- [ ] `hermes mcp list | grep composio` shows a `connected` entry.
-- [ ] `hermes mcp tools composio` lists the four meta-tools: `composio_search_tools`, `composio_execute_tool`, `composio_multi_execute`, `composio_manage_connections`.
+- [ ] `hermes mcp list | grep composio` shows an `enabled` entry (the URL will look like `https://backend.composio.dev/tool_router/trs_xxxxxxxx/mcp` — session-scoped, not the static `mcp.composio.dev/mcp`).
+- [ ] `hermes mcp test composio` returns `✓ Connected` + `✓ Tools discovered: 6` — the six real meta-tools: `COMPOSIO_SEARCH_TOOLS`, `COMPOSIO_GET_TOOL_SCHEMAS`, `COMPOSIO_MULTI_EXECUTE_TOOL`, `COMPOSIO_MANAGE_CONNECTIONS`, `COMPOSIO_REMOTE_BASH_TOOL`, `COMPOSIO_REMOTE_WORKBENCH`.
 
 ## 2b. Transport (Path B — REST fallback)
 
@@ -42,10 +44,21 @@
 
 ## 4. Routing wiring
 
-- [ ] `hermes config get skills.config.model-router.routes.composio_lookup` returns a populated route.
-- [ ] `hermes config get skills.config.model-router.routes.composio_action` returns a populated route.
-- [ ] `hermes config get skills.config.model-router.routes.composio_image_prompt` returns a populated route (if image-prompt routing is enabled).
-- [ ] Each route's `provider` and `model` reference a real entry in `hermes config get providers`.
+`hermes config get` doesn't exist in 0.14 — read the YAML directly:
+
+```bash
+python3 -c "
+import yaml
+c = yaml.safe_load(open('/root/.hermes/config.yaml'))
+r = c['skills']['config']['model-router']['routes']
+for k in ['composio_lookup','composio_action','composio_image_prompt']:
+    print(f\"{k}: {r.get(k,{}).get('model','MISSING')}\")"
+```
+
+- [ ] `composio_lookup` populated with a Haiku-class model slug.
+- [ ] `composio_action` populated with a Sonnet-class model slug.
+- [ ] `composio_image_prompt` populated (if image-prompt routing is enabled).
+- [ ] Each route's `provider` matches an entry in `providers:` (or is `openrouter` if the install is OpenRouter-only).
 
 ## 5. Smoke test (live)
 

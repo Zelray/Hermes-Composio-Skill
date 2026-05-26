@@ -19,10 +19,9 @@ hermes --version
 # 2. Is a key already present in the Hermes env? Check both locations:
 #    (a) ~/.hermes/.env  (recommended location)
 test -f ~/.hermes/.env && grep -c '^COMPOSIO_API_KEY=' ~/.hermes/.env || echo "no key in .env"
-#    (b) Hermes config (only set if user explicitly chose this path). The exact
-#        key path may differ between Hermes versions; if `composio.api_key` is
-#        unrecognized, that is fine — it just means the key is not stored there.
-hermes config get composio.api_key 2>/dev/null || true
+#    (b) Hermes config (only set if user explicitly chose this path). Hermes
+#        0.14 has no `config get` subcommand — use `config show` and grep.
+hermes config show 2>/dev/null | grep -i composio || true
 
 # 3. Is the composio MCP server already attached?
 hermes mcp list | grep -i composio || echo "no composio MCP yet"
@@ -83,12 +82,15 @@ This writes to `~/.hermes/config.yaml`. Hermes redacts it in `hermes config` out
 # Bundled verification script (after Hermes-side skill is installed)
 bash ~/.hermes/skills/composio/scripts/verify_composio.sh
 
-# Or a direct curl probe (no skill needed)
+# Or a direct curl probe (no skill needed). Composio v1 API is deprecated — use v3.
 curl -sS -H "x-api-key: $COMPOSIO_API_KEY" \
-  https://backend.composio.dev/api/v1/toolkits | head -c 200
+  https://backend.composio.dev/api/v3/toolkits | head -c 200
 ```
 
-Expected: a JSON response listing toolkits. If the response is `{"error":"unauthorized"}`, the key was copied wrong — regenerate at https://platform.composio.dev/settings.
+Expected: a JSON response with `{"items":[...]}` listing toolkits. Common errors:
+- `{"error":"This endpoint is no longer available. Please upgrade to v3 APIs."}` — you hit `/api/v1/...`. Use `/api/v3/...`.
+- `{"error":"Failed to fetch API key information from DB","code":10401,...}` — DB lag right after key creation. Wait 5 minutes and retry; the key is fine.
+- Genuine `unauthorized` errors mean the key was copied wrong — regenerate at https://platform.composio.dev/settings.
 
 ### Step 5 — One-line PM summary
 

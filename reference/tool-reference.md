@@ -2,16 +2,22 @@
 
 > Use this file when constructing tool definitions, debugging tool calls, or explaining to the user what each Composio tool does. Descriptions are written to maximize Sonnet's tool-selection accuracy: concrete trigger language, explicit when-to-use, and clear when-not-to-use.
 
-## The four logical tools
+## The six meta-tools (Composio Tool Router, real surface)
 
-Composio exposes hundreds of concrete tool slugs (`GMAIL_SEND_EMAIL`, `GITHUB_CREATE_ISSUE`, etc.) plus four meta-tools that the agent calls. The four meta-tools are what Sonnet actually picks from:
+> **Source:** Captured directly from `hermes mcp test composio` on a working Hermes 0.14 + Composio install on 2026-05-26. Composio's actual MCP surface differs from older Composio plugin READMEs (which described a 4-tool surface). The current tool set is six meta-tools — names are uppercase.
+
+Composio exposes hundreds of concrete tool slugs (`GMAIL_SEND_EMAIL`, `GITHUB_CREATE_ISSUE`, etc.) plus six meta-tools that the agent picks from:
 
 | Tool name | Purpose | Sonnet calls it when… |
 |---|---|---|
-| `composio_search_tools` | Find candidate tool slugs by intent. | The user describes an outcome ("send a Slack message", "create a Linear ticket") but the agent doesn't yet know the exact slug. |
-| `composio_execute_tool` | Run one tool slug with arguments. | The agent has a confirmed slug + arg set and the action should happen now. |
-| `composio_multi_execute` | Run up to N tool calls in parallel. | The user asks for a multi-target action ("notify Slack and create a Linear ticket and email Bob"). |
-| `composio_manage_connections` | Check / connect / disconnect toolkits. | The agent hits an auth error, OR the user asks to add/remove a toolkit, OR the agent needs to verify a toolkit is connected before calling its tools. |
+| `COMPOSIO_SEARCH_TOOLS` | Find candidate tool slugs by intent. | The user describes an outcome ("send a Slack message", "create a Linear ticket") but the agent doesn't yet know the exact slug. |
+| `COMPOSIO_GET_TOOL_SCHEMAS` | Fetch the JSON-schema input definition for one or more known slugs. | The agent has slug candidates from SEARCH_TOOLS and now needs the exact argument shape before calling MULTI_EXECUTE_TOOL. |
+| `COMPOSIO_MULTI_EXECUTE_TOOL` | Run 1–N tool calls in parallel. | The agent has confirmed slug(s) + arg set(s) — handles both single calls and bulk. There is no separate "execute one" tool. |
+| `COMPOSIO_MANAGE_CONNECTIONS` | Check / connect / disconnect toolkits. | The agent hits an auth error, OR the user asks to add/remove a toolkit, OR the agent needs to verify a toolkit is connected before calling its tools. |
+| `COMPOSIO_REMOTE_BASH_TOOL` | Execute bash in Composio's remote sandbox. | The user asks for a one-off shell action on Composio-managed remote files (rare; mostly for advanced workflows). |
+| `COMPOSIO_REMOTE_WORKBENCH` | Process remote files or script bulk tool executions in the Composio sandbox. | The user wants a multi-step file pipeline (download → transform → re-upload) without running it on the Hermes host. |
+
+The standard tool-call sequence is **SEARCH_TOOLS → GET_TOOL_SCHEMAS → MULTI_EXECUTE_TOOL**, with MANAGE_CONNECTIONS as an out-of-band setup step. The REMOTE_BASH / REMOTE_WORKBENCH pair are sandboxed extras and not required for typical SaaS actions.
 
 ## Sonnet-tuned tool descriptions
 
@@ -21,15 +27,15 @@ These are the descriptions to ship in `assets/hermes-composio-skill/SKILL.md`. E
 - Names the *opposite* tool to use (anti-routing hint).
 - Specifies argument shape with one realistic example.
 
-### `composio_search_tools`
+### `COMPOSIO_SEARCH_TOOLS`
 
 ```yaml
-name: composio_search_tools
+name: COMPOSIO_SEARCH_TOOLS
 description: |
   Search Composio's tool catalog for a tool slug matching the user's intent.
-  Call this BEFORE composio_execute_tool when you do not already know the exact
-  slug. Returns up to `limit` matching tools with their slug, toolkit, and a one-line
-  description.
+  Call this BEFORE COMPOSIO_MULTI_EXECUTE_TOOL when you do not already know the
+  exact slug. Returns up to `limit` matching tools with their slug, toolkit,
+  and a one-line description.
 
   Use when the user says: "send a message in Slack", "create a doc in Notion",
   "log a Salesforce activity" — and you do not have the slug memorized.
@@ -55,58 +61,52 @@ example:
   limit: 3
 ```
 
-### `composio_execute_tool`
+### `COMPOSIO_GET_TOOL_SCHEMAS`
 
 ```yaml
-name: composio_execute_tool
+name: COMPOSIO_GET_TOOL_SCHEMAS
 description: |
-  Execute one Composio tool slug with its arguments. Returns the tool result
-  (JSON) or an error. This is the "do the thing" call.
+  Fetch the input JSON-schema for one or more known tool slugs. Call this after
+  COMPOSIO_SEARCH_TOOLS narrows you to a candidate slug, but before
+  COMPOSIO_MULTI_EXECUTE_TOOL, so you know the exact argument shape.
 
-  Use when: you have a confirmed slug (from prior search or memory) and a full
-  argument set, AND the user has implicitly or explicitly authorized the action.
+  Use when: you have slug candidate(s) from search but the schema is not in
+  your context yet.
 
-  Do NOT use when:
-    - The slug is uncertain — call composio_search_tools first.
-    - The toolkit is not yet connected — call composio_manage_connections.
-    - The action is destructive (delete/send-irreversible) and the user has not
-      explicitly confirmed. Ask first.
-    - You need to run 2+ actions at once — call composio_multi_execute.
+  Do NOT use when: you already executed this exact slug in this conversation
+  and the schema is in your scrollback. Re-fetching is wasted tokens.
 parameters:
-  tool_slug:
-    type: string
-    description: Exact uppercase slug. Example GMAIL_SEND_EMAIL.
-  arguments:
-    type: object
-    description: Tool-specific argument object. Shape matches the slug's schema as returned by composio_search_tools.
+  tool_slugs:
+    type: array
+    items: string
+    description: List of uppercase tool slugs to fetch schemas for.
 example:
-  tool_slug: GMAIL_SEND_EMAIL
-  arguments:
-    to: "bob@example.com"
-    subject: "Confirming Tuesday 2pm"
-    body: "Hi Bob, confirming our meeting for Tuesday at 2pm PT. — sent via Hermes"
+  tool_slugs: ["GMAIL_SEND_EMAIL"]
 ```
 
-### `composio_multi_execute`
+### `COMPOSIO_MULTI_EXECUTE_TOOL`
 
 ```yaml
-name: composio_multi_execute
+name: COMPOSIO_MULTI_EXECUTE_TOOL
 description: |
-  Execute up to 10 tool calls in parallel (Composio supports 50; the overlay caps
-  to 10 by default for cost safety — see skills.config.composio.max_multi_execute_size).
-  Returns an array of per-call results.
+  Execute 1–N tool calls in parallel. Composio supports up to 50; the overlay
+  caps to skills.config.composio.max_multi_execute_size (default 10) for cost
+  safety. Returns an array of per-call results.
 
-  Use when the user's single request spans multiple tools or multiple targets:
-    - "Notify Slack and create a Linear ticket and email the author"
-    - "Cross-post this announcement to Slack #general and Slack #product"
-    - "Get my last 5 PRs from each of these 3 repos"
+  This is the single execution surface — there is no separate "execute one"
+  meta-tool. For a single call, pass an `executions` list of length 1.
+
+  Use when the user's request spans one or more tools:
+    - Single: "Send an email to Bob confirming Tuesday." (executions length 1)
+    - Multi-target: "Notify Slack and create a Linear ticket and email the author."
+    - Cross-post: "Post this announcement to Slack #general and #product."
+    - Fan-out: "Get my last 5 PRs from each of these 3 repos."
 
   Do NOT use when:
-    - Calls have dependencies (output of A feeds into B). Use sequential
-      composio_execute_tool calls instead.
-    - Only one call is needed. Use composio_execute_tool.
-    - More than 10 calls. Split into batches or raise max_multi_execute_size with
-      user approval.
+    - Calls have dependencies (output of A feeds into B). Sequence two calls
+      instead — fan-out parallelism is for independent calls.
+    - More than max_multi_execute_size calls. Split into batches or raise the
+      cap with user approval.
 parameters:
   executions:
     type: array
@@ -115,7 +115,14 @@ parameters:
       properties:
         tool_slug: { type: string }
         arguments: { type: object }
-example:
+example_single:
+  executions:
+    - tool_slug: GMAIL_SEND_EMAIL
+      arguments:
+        to: "bob@example.com"
+        subject: "Confirming Tuesday 2pm"
+        body: "Hi Bob, confirming Tuesday 2pm PT. — sent via Hermes"
+example_multi:
   executions:
     - tool_slug: GITHUB_CREATE_ISSUE
       arguments: { title: "Bug X", repo: "org/repo", body: "..." }
@@ -123,10 +130,10 @@ example:
       arguments: { channel: "#dev", text: "Filed bug X" }
 ```
 
-### `composio_manage_connections`
+### `COMPOSIO_MANAGE_CONNECTIONS`
 
 ```yaml
-name: composio_manage_connections
+name: COMPOSIO_MANAGE_CONNECTIONS
 description: |
   Check, create, or remove a toolkit connection. A "connection" is the user's
   authenticated link to a SaaS account (Gmail OAuth, Slack OAuth, GitHub PAT).
@@ -134,8 +141,8 @@ description: |
 
   Use when:
     - The user says "connect my Gmail", "link Slack", "remove GitHub connection".
-    - A composio_execute_tool call returns an auth/connection error — call this
-      to check status and re-trigger the connect flow.
+    - A COMPOSIO_MULTI_EXECUTE_TOOL call returns an auth/connection error — call
+      this to check status and re-trigger the connect flow.
     - You need to verify a toolkit is connected before promising the user an action.
 parameters:
   action:
@@ -149,6 +156,47 @@ parameters:
 example:
   action: connect
   toolkits: ["gmail"]
+```
+
+### `COMPOSIO_REMOTE_BASH_TOOL` (advanced)
+
+```yaml
+name: COMPOSIO_REMOTE_BASH_TOOL
+description: |
+  Execute a bash command in Composio's REMOTE sandbox. Use only for file
+  operations on Composio-managed remote files. Not for general system
+  administration — for that, use the Hermes host directly.
+
+  Use when: the user explicitly asks to manipulate files inside Composio's
+  workbench environment.
+
+  Do NOT use when: the action belongs on the Hermes host or on the user's
+  local machine. The remote sandbox is ephemeral.
+parameters:
+  command:
+    type: string
+    description: Bash command line to run in the remote sandbox.
+```
+
+### `COMPOSIO_REMOTE_WORKBENCH` (advanced)
+
+```yaml
+name: COMPOSIO_REMOTE_WORKBENCH
+description: |
+  Process remote files or script bulk tool execution in Composio's sandbox.
+  Higher-level than REMOTE_BASH_TOOL — accepts a workflow description and
+  orchestrates the file pipeline.
+
+  Use when: the user asks for a multi-step file pipeline (download a Google
+  Drive file → transform → upload to Notion) and wants it to run on
+  Composio's infra instead of the Hermes host.
+
+  Do NOT use when: the workflow can be expressed as 2–3 MULTI_EXECUTE_TOOL
+  calls. The workbench is for complex pipelines, not simple chains.
+parameters:
+  workflow:
+    type: object
+    description: Workflow spec (consult COMPOSIO_GET_TOOL_SCHEMAS for the exact shape).
 ```
 
 ## Slug-naming conventions Sonnet should learn
@@ -177,8 +225,10 @@ This prefix table feeds `skills.config.model-router.routes.*.tool_slugs_prefix` 
 
 | Composio error | What to tell the user | What to do next |
 |---|---|---|
-| `unauthorized` (HTTP 401) | "Composio API key is invalid or revoked." | Rerun `api-key-setup.md` Step 4 verification. |
-| `connection_not_found` for toolkit | "{Toolkit} is not connected yet — let me connect it." | Call `composio_manage_connections action=connect`. |
+| `unauthorized` (HTTP 401) — generic | "Composio API key is invalid or revoked." | Rerun `api-key-setup.md` Step 4 verification. |
+| `Failed to fetch API key information from DB` (HTTP 401 code 10401 / HTTP 500 code 809) | "Composio's backend is propagating your new key. Give it 5 minutes." | Wait 5 min. If still failing, regenerate the key. This error is most common right after key creation. |
+| `connection_not_found` for toolkit | "{Toolkit} is not connected yet — let me connect it." | Call `COMPOSIO_MANAGE_CONNECTIONS action=connect`. |
 | `rate_limit` (HTTP 429) | "Composio rate limit hit." | Back off 30s, retry once. If recurring, recommend the user upgrade Composio plan. |
-| `tool_not_found` | "That action isn't available in this Composio toolkit." | Call `composio_search_tools` with a broader query. |
-| `invalid_arguments` | "Tool argument mismatch — let me re-check the schema." | Call `composio_search_tools` again to refresh the schema, then retry. |
+| `tool_not_found` | "That action isn't available in this Composio toolkit." | Call `COMPOSIO_SEARCH_TOOLS` with a broader query. |
+| `invalid_arguments` | "Tool argument mismatch — let me re-check the schema." | Call `COMPOSIO_GET_TOOL_SCHEMAS` for the slug, then retry. |
+| `This endpoint is no longer available. Please upgrade to v3 APIs.` (HTTP 410) | "Old Composio API endpoint — we should be on v3." | Replace `/api/v1/...` with `/api/v3/...` in any curl probes. The MCP path is unaffected. |

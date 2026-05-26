@@ -29,12 +29,14 @@ End user is a **Product Manager, not a coder**. Before showing YAML, JSON, or co
 
 Always inspect before changing. Confirm Hermes version, current MCP servers, current `skills.config.composio.*` state, and whether `COMPOSIO_API_KEY` already exists in `~/.hermes/.env` / environment / `~/.hermes/config.yaml`. Do not invent Composio tool slugs — they map to `<TOOLKIT>_<ACTION>` (e.g. `GMAIL_SEND_EMAIL`, `GITHUB_CREATE_ISSUE`); verify against the live Composio dashboard or `composio_search_tools` before constructing examples.
 
-Composio integrates with Hermes through two supported channels:
+Composio integrates with Hermes through two channels. **Important real-world note (verified 2026-05-26):** Composio's MCP endpoint is **session-scoped**, not a static URL. You bootstrap via the Composio Python SDK on the Hermes host (`pip install composio && python3 -c "from composio import Composio; print(Composio().create(user_id='user_xxx').mcp.url)"`) to get a URL of the form `https://backend.composio.dev/tool_router/<session_id>/mcp`, then write that URL into `mcp_servers.composio.url` in `~/.hermes/config.yaml`.
+
+Additionally, Hermes 0.14's `hermes mcp add --auth header` hard-codes `Authorization: Bearer <token>` and does **not** support custom header names. Composio requires `x-api-key: <token>`. The interactive `hermes mcp add` flow therefore cannot attach Composio — you must write the `mcp_servers.composio` entry directly into `~/.hermes/config.yaml`. See `reference/hermes-install.md` for the Python edit script.
 
 | Channel | Native to Hermes? | Recommended for | Source of tool defs |
 |---|---|---|---|
-| **MCP server** (`hermes mcp add composio`) | Yes (`hermes mcp add [server]`) | Default install. Sonnet sees standardized MCP tool list. | Composio MCP endpoint |
-| **REST API via skill** | No — overlay calls Composio HTTPS endpoints | Air-gapped / firewalled envs, or when MCP server is unavailable | `assets/hermes-composio-skill/SKILL.md` |
+| **MCP server** (direct config edit) | Storage native; flag set in 0.14 doesn't support the custom-header case — write the entry directly. | Default install. Sonnet sees standardized MCP tool list (6 meta-tools). | Composio MCP endpoint |
+| **REST API via skill** | No — overlay calls Composio HTTPS endpoints directly | Air-gapped / firewalled envs, or when MCP server is unavailable | `assets/hermes-composio-skill/SKILL.md` |
 
 | Need | Read this file |
 |---|---|
@@ -63,14 +65,18 @@ See `reference/hermes-install.md` for the copy-and-verify procedure.
 4. **Verify.** Use `verification-checklist.md` end-to-end after every install or config change.
 5. **Summarize for the PM.** One plain-English line: what shifted, what to watch for, how to roll back.
 
-## Quick reference: tool slugs Sonnet will see
+## Quick reference: real Composio meta-tools Sonnet sees
 
-| Logical name | Composio tool slug pattern | Used by Sonnet for |
-|---|---|---|
-| Search | `composio_search_tools` | "What can Composio do for X?" — finds candidate `TOOLKIT_ACTION` slugs by intent. |
-| Execute one | `composio_execute_tool` | Single authenticated action (send email, create issue, post message). |
-| Execute many | `composio_multi_execute` | Up to 50 actions in parallel (e.g. cross-post + log + notify). |
-| Connections | `composio_manage_connections` | Check / connect / disconnect a toolkit (`status`, `connect github`, `disconnect gmail`). |
+Verified via `hermes mcp test composio` on a live install (2026-05-26). Six tools, uppercase names — these are what Sonnet picks from. Concrete Composio slugs like `GMAIL_SEND_EMAIL` are *arguments* to `COMPOSIO_MULTI_EXECUTE_TOOL`, not separate tools.
+
+| Tool | Used by Sonnet for |
+|---|---|
+| `COMPOSIO_SEARCH_TOOLS` | "What can Composio do for X?" — find candidate `TOOLKIT_ACTION` slugs by intent. |
+| `COMPOSIO_GET_TOOL_SCHEMAS` | Fetch the exact JSON-schema for a candidate slug before calling. |
+| `COMPOSIO_MULTI_EXECUTE_TOOL` | Execute 1–N tool calls (single OR parallel). There is no separate "execute one" — use `executions` of length 1 for single calls. |
+| `COMPOSIO_MANAGE_CONNECTIONS` | Check / connect / disconnect a toolkit (`status`, `connect github`, `disconnect gmail`). |
+| `COMPOSIO_REMOTE_BASH_TOOL` | Advanced — bash inside Composio's remote sandbox (file ops only). |
+| `COMPOSIO_REMOTE_WORKBENCH` | Advanced — multi-step file pipelines that should run on Composio's infra. |
 
 ## When NOT to use this skill
 

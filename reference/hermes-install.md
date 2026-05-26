@@ -32,42 +32,104 @@ curl -sS -o /dev/null -w "%{http_code}\n" \
 
 Hermes 0.14 supports MCP servers via `hermes mcp add`. Composio exposes a managed MCP endpoint that auto-discovers tools per connected toolkit.
 
-### A.1 — Attach the MCP server
+### A.1 — Get the session-scoped MCP URL
 
-**Step 1 (required) — confirm the actual flag syntax for this Hermes version:**
+> **Important — verified during the 2026-05-26 install:** Composio's MCP endpoint is **NOT** a static `mcp.composio.dev/mcp`. It is session-scoped, of the form `https://backend.composio.dev/tool_router/<session_id>/mcp`. You must bootstrap one session via the Composio Python SDK before attaching it to Hermes.
+
+**Step 1 — install the Composio SDK on the Hermes host** (one-time, just to bootstrap the session ID):
+
+```bash
+# Hermes 0.14 ships with Python 3.11 — pip works directly.
+pip3 install --break-system-packages composio
+```
+
+**Step 2 — create the session and capture URL + headers:**
+
+```bash
+python3 <<'PY'
+import os, json
+from composio import Composio
+c = Composio()  # reads COMPOSIO_API_KEY from env
+s = c.create(user_id=os.environ.get("COMPOSIO_USER_ID","user_default"))
+print("session_id:", s.session_id)
+print("mcp.url:", s.mcp.url)
+print("mcp.headers:", json.dumps(dict(s.mcp.headers)))
+PY
+```
+
+Expected output (your `session_id` will differ):
+```
+session_id: trs_xxxxxxxxxxxxx
+mcp.url: https://backend.composio.dev/tool_router/trs_xxxxxxxxxxxxx/mcp
+mcp.headers: {"x-api-key": "ak_..."}
+```
+
+Persist the session ID for future reuse — Composio's `composio.use(session_id)` reuses the same session URL across restarts. Save both values somewhere you can paste them later.
+
+### A.2 — Attach the MCP server to Hermes
+
+> **Verified during install:** `hermes mcp add --auth header` on Hermes 0.14 hard-codes `Authorization: Bearer <token>` (source: `hermes_cli/mcp_config.py:332`). Composio requires `x-api-key: <token>`. The interactive `hermes mcp add` flow therefore **cannot** attach Composio correctly. Use the direct-config-edit method below.
+
+**Confirm the flag set anyway (for context):**
 
 ```bash
 hermes mcp add --help
 ```
 
-Hermes flag names move between versions. Read the help output, then construct the add command. The required conceptual fields are: a name (`composio`), a URL (`https://mcp.composio.dev/mcp`), and an auth header carrying the API key.
+Hermes 0.14 supports: `--url`, `--command`, `--args`, `--auth {oauth,header}`, `--preset`, `--env`. Note there is no `--header NAME=VAL` flag and `--auth header` only does Bearer.
 
-**Step 2 — example shape (validate flags from --help before running):**
+**Direct config edit — the working path:**
 
 ```bash
-# Example only — replace flag names with whatever `hermes mcp add --help` shows.
-# SECURITY: passing the key inline puts it in process args, shell history, and
-# audit logs. Prefer Hermes' --header-from-file / --header-from-env if it
-# exists. Otherwise rotate the key immediately after a successful add.
-hermes mcp add composio \
-  --transport http \
-  --url https://mcp.composio.dev/mcp \
-  --header "x-api-key:$COMPOSIO_API_KEY"
+python3 <<'PY'
+import yaml, shutil, os, datetime
+cfg_path = "/root/.hermes/config.yaml"   # adjust if HERMES_HOME differs
+backup = "{}.bak.composio-{}".format(cfg_path, datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+shutil.copy2(cfg_path, backup)
+print("backup:", backup)
+
+with open(cfg_path) as f:
+    cfg = yaml.safe_load(f)
+
+cfg.setdefault("mcp_servers", {})
+cfg["mcp_servers"]["composio"] = {
+    "url": "https://backend.composio.dev/tool_router/<paste-session-id>/mcp",
+    "headers": {"x-api-key": "${COMPOSIO_API_KEY}"},
+    "enabled": True,
+    "transport": "http",
+}
+
+with open(cfg_path, "w") as f:
+    yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False)
+os.chmod(cfg_path, 0o600)
+print("config written")
+PY
 ```
 
-If `hermes mcp add` does not accept these specific flags on the installed version, do not improvise — surface the help output to the PM and ask for confirmation before substituting.
+Hermes stores MCP servers under the top-level `mcp_servers:` key in `~/.hermes/config.yaml` (source: `hermes_cli/mcp_config.py:6-9`). Env-var interpolation (`${COMPOSIO_API_KEY}`) works for header values.
 
-### A.2 — Verify
+### A.3 — Verify
 
 ```bash
 hermes mcp list
-# Expect: composio  http  https://mcp.composio.dev/mcp  connected
+# Expect: composio  http  https://backend.composio.dev/tool_router/<session-id>/mcp  enabled
 
-hermes mcp tools composio | head -20
-# Expect: a list of tool names (search_tools, execute_tool, multi_execute, manage_connections).
+hermes mcp test composio
+# Expect: ✓ Connected  + ✓ Tools discovered: 6
 ```
 
-### A.3 — Install the Hermes-side overlay skill
+The 6 tools Hermes 0.14 + Composio expose today (real names captured during 2026-05-26 install):
+
+- `COMPOSIO_SEARCH_TOOLS` — discover tool slugs by intent
+- `COMPOSIO_GET_TOOL_SCHEMAS` — fetch input schemas for selected slugs
+- `COMPOSIO_MULTI_EXECUTE_TOOL` — run 1–N tool calls (single OR parallel)
+- `COMPOSIO_MANAGE_CONNECTIONS` — OAuth / API-key connect flow per toolkit
+- `COMPOSIO_REMOTE_BASH_TOOL` — bash in Composio's remote sandbox
+- `COMPOSIO_REMOTE_WORKBENCH` — file/bulk-tool operations in the sandbox
+
+> **Composio backend hiccups:** During the bootstrap install, Composio sometimes returns `500 / Failed to fetch API key information from DB` for a few minutes immediately after a new key is generated (DB propagation lag). If `hermes mcp test composio` fails with that exact error, wait 5 minutes and retry. Hermes-side config is fine — wait it out.
+
+### A.4 — Install the Hermes-side overlay skill
 
 Copy the bundled overlay from this Claude Code skill onto the Hermes host. Replace `<hermes-host>` with the actual SSH host/alias the user has configured (verify with `ssh -G <host> | head -5`; do not invent a hostname).
 
@@ -89,14 +151,19 @@ The overlay skill does **not** duplicate MCP tool definitions — Hermes discove
 - Routing hooks into `skills.config.model-router.*` so cheap Composio queries land on Haiku.
 - Connect/disconnect prompts when an OAuth token is missing.
 
-### A.4 — Wire routing (optional but recommended)
+### A.5 — Wire routing (optional but recommended)
 
-**Step 1 — list the user's configured providers so the route can reference a real one:**
+**Step 1 — inspect existing providers / routes so the new routes reference real models:**
 
 ```bash
-hermes config get providers
-# Note the provider IDs and the cheap (Haiku-class) model ID exposed by each.
+# Hermes 0.14 has no `config get` — use `config show` and grep.
+hermes config show 2>&1 | grep -A3 -E "^providers:|model:"
+
+# Or read the YAML directly:
+python3 -c "import yaml; c=yaml.safe_load(open('/root/.hermes/config.yaml')); print('providers:', list((c.get('providers') or {}).keys())); print('default model:', c.get('model',{}).get('default'))"
 ```
+
+Hermes installs that route everything through OpenRouter (the most common pattern as of 2026-05) will show `providers: []` and a default model slug like `anthropic/claude-sonnet-4` or `moonshotai/kimi-k2.6`. In that case use `provider: openrouter` for the route entries below and use OpenRouter model slugs (e.g. `anthropic/claude-haiku-4.5`, `anthropic/claude-sonnet-4`).
 
 **Step 2 — edit `~/.hermes/config.yaml` (replace `TODO_*` placeholders with values from Step 1):**
 
@@ -132,7 +199,7 @@ skills:
 
 Note that `skills.config.composio.*` is **overlay data inside the native Hermes namespace** — same dual-nature pattern as `skills.config.model-router.*`.
 
-### A.5 — Connect a first toolkit (smoke test)
+### A.6 — Connect a first toolkit (smoke test)
 
 ```bash
 # Ask Hermes (interactively) to connect Gmail

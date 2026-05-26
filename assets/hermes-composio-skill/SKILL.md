@@ -49,43 +49,56 @@ skills:
 
 API key is read from `COMPOSIO_API_KEY` env var (preferred) or `composio.api_key` in `config.yaml` (fallback). Never print the key in agent responses.
 
-## The four meta-tools
+## The six meta-tools
 
-The agent picks from these four. Composio slugs (`GMAIL_SEND_EMAIL`, etc.) are *arguments* to `composio_execute_tool`, not separate tools.
+Composio Tool Router exposes six meta-tools. Composio slugs (`GMAIL_SEND_EMAIL`, etc.) are *arguments* to `COMPOSIO_MULTI_EXECUTE_TOOL`, not separate tools.
 
-### 1. `composio_search_tools`
+### 1. `COMPOSIO_SEARCH_TOOLS`
 
-Search Composio's catalog for a slug matching the user's intent. Call BEFORE `composio_execute_tool` when the slug is not yet known. Returns up to `limit` candidates with `slug`, `toolkit`, `description`, and `parameters` schema.
+Search the Composio catalog for slug(s) matching the user's intent. Call this BEFORE `COMPOSIO_MULTI_EXECUTE_TOOL` when the slug is not yet known. Returns candidate slugs + descriptions.
 
 Args: `query` (string, required), `toolkits` (array of toolkit slugs, optional), `limit` (int, default 5).
 
-### 2. `composio_execute_tool`
+### 2. `COMPOSIO_GET_TOOL_SCHEMAS`
 
-Execute one Composio tool. Requires a confirmed `tool_slug` and `arguments` matching its schema.
+Fetch the input JSON-schema for one or more known slugs. Call this after SEARCH_TOOLS when you need the exact argument shape before executing.
 
-Args: `tool_slug` (uppercase, required), `arguments` (object, required).
+Args: `tool_slugs` (array of uppercase slugs, required).
 
-### 3. `composio_multi_execute`
+### 3. `COMPOSIO_MULTI_EXECUTE_TOOL`
 
-Run up to `skills.config.composio.max_multi_execute_size` (default 10) calls in parallel. Use only when calls are independent.
+Execute 1–N Composio tool calls. This is the single execution surface — both single and bulk calls use this tool. For a single call, pass `executions` of length 1. Up to `skills.config.composio.max_multi_execute_size` (default 10) calls in parallel.
 
 Args: `executions` (array of `{tool_slug, arguments}` objects).
 
-### 4. `composio_manage_connections`
+### 4. `COMPOSIO_MANAGE_CONNECTIONS`
 
 Check, connect, or disconnect a toolkit.
 
 Args: `action` (one of `status`, `connect`, `disconnect`, `list`), `toolkits` (array, omitted when action=list).
 
+### 5. `COMPOSIO_REMOTE_BASH_TOOL` (advanced)
+
+Run a bash command inside Composio's remote sandbox. Use only for file ops on Composio-managed remote files. Not a general system-administration tool.
+
+Args: `command` (string, required).
+
+### 6. `COMPOSIO_REMOTE_WORKBENCH` (advanced)
+
+Process remote files or script bulk tool execution in Composio's sandbox. Higher-level than REMOTE_BASH_TOOL — for multi-step file pipelines that should run on Composio's infra.
+
+Args: `workflow` (object, schema via GET_TOOL_SCHEMAS).
+
 ## Workflow the agent follows
 
 1. **Detect Composio intent.** User wants an action in Gmail / Slack / GitHub / Notion / Linear / Jira / etc., or explicitly mentions Composio.
 2. **Route by complexity.** Read `skills.config.model-router.routes.composio_lookup`, `composio_action`, `composio_image_prompt`. Match the user's request against `keywords` and the candidate tool slug's prefix (`LIST_`, `GET_`, `SEARCH_` → lookup; `CREATE_`, `SEND_`, `UPDATE_`, `REPLY_` → action; `DELETE_` → always confirm + action).
-3. **Discover slug.** Call `composio_search_tools` with `query` = user's intent and `toolkits` = filter from explicit context. Pick the top match whose name matches the user's verb.
-4. **Verify connection.** If the toolkit has not been used this session, call `composio_manage_connections action=status toolkits=[<toolkit>]`. If not connected, call `composio_manage_connections action=connect toolkits=[<toolkit>]`, surface the auth URL to the user, and pause until the user confirms.
-5. **Confirm destructive / outbound ops.** If `confirm_before_write` is true AND the slug starts with `DELETE_`, `ARCHIVE_`, `REVOKE_`, `SEND_`, or `REPLY_`: state the planned action in plain English and wait for explicit "yes". `CREATE_` and `UPDATE_` do NOT require confirmation by default — they generate too many prompts and the user disables the safety net. The PM can opt into stricter confirmation with `skills.config.composio.confirm_create_update: true`.
-6. **Execute.** Call `composio_execute_tool` (single) or `composio_multi_execute` (parallel).
-7. **Summarize.** Translate the JSON result into one or two sentences for the user.
+3. **Discover slug.** Call `COMPOSIO_SEARCH_TOOLS` with `query` = user's intent and `toolkits` = filter from explicit context. Pick the top match whose name matches the user's verb.
+4. **Fetch schema** (if not in scrollback). Call `COMPOSIO_GET_TOOL_SCHEMAS` with the chosen slug(s) so the argument shape is exact before execution.
+5. **Verify connection.** If the toolkit has not been used this session, call `COMPOSIO_MANAGE_CONNECTIONS action=status toolkits=[<toolkit>]`. If not connected, call `COMPOSIO_MANAGE_CONNECTIONS action=connect toolkits=[<toolkit>]`, surface the auth URL to the user, and pause until the user confirms.
+6. **Confirm destructive / outbound ops.** If `confirm_before_write` is true AND the slug starts with `DELETE_`, `ARCHIVE_`, `REVOKE_`, `SEND_`, or `REPLY_`: state the planned action in plain English and wait for explicit "yes". `CREATE_` and `UPDATE_` do NOT require confirmation by default — they generate too many prompts and the user disables the safety net. The PM can opt into stricter confirmation with `skills.config.composio.confirm_create_update: true`.
+7. **Execute.** Call `COMPOSIO_MULTI_EXECUTE_TOOL` with `executions` of length 1 (single call) or N (bulk fan-out).
+8. **Summarize.** Translate the JSON result into one or two sentences for the user.
 
 ## Helper scripts
 
@@ -111,12 +124,14 @@ Never persist `/model` changes via `--global` unless the user explicitly asks.
 
 ## Auth error recovery
 
-If `composio_execute_tool` returns `unauthorized` or `connection_not_found`:
+If `COMPOSIO_MULTI_EXECUTE_TOOL` returns `unauthorized` or `connection_not_found`:
 
 1. State plainly: "I need to reconnect your {toolkit} via Composio."
-2. Call `composio_manage_connections action=connect toolkits=[<toolkit>]`.
+2. Call `COMPOSIO_MANAGE_CONNECTIONS action=connect toolkits=[<toolkit>]`.
 3. Print the auth URL.
 4. Wait for the user to confirm. Do not retry the original call until the user says they have completed the connect flow.
+
+**Special case — DB propagation lag.** If the error message is `Failed to fetch API key information from DB` (code 10401 / 809), the key is being propagated by Composio's backend (~5 min after key generation). Tell the user: "Composio is still propagating your new key. I'll retry in 5 minutes." Do NOT trigger a reconnect flow — the key is fine, the backend just isn't ready.
 
 ## What this skill does NOT do
 
